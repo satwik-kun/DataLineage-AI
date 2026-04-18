@@ -1,0 +1,11 @@
+customer_id,customer_name,signup_date,segment,region
+C001,Alice Chen,2025-03-11,SMB,North
+C002,Bob Martin,2025-05-24,Enterprise,South
+C003,Carla Gomez,2025-06-15,SMB,East
+C004,Daniel Lee,2025-07-02,Mid-Market,West
+C005,Eva Singh,2025-08-19,Enterprise,South
+C006,Farah Ali,2025-09-28,SMB,East
+C007,Gary Kim,2025-10-14,Mid-Market,North
+C008,Hana Patel,2025-11-03,SMB,West
+C009,Ivan Torres,2025-12-07,Enterprise,South
+C010,Jules Brown,2026-01-09,SMB,North

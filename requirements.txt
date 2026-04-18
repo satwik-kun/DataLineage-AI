@@ -1,0 +1,10 @@
+networkx>=3.2
+pandas>=2.2
+numpy>=1.26
+matplotlib>=3.8
+sentence-transformers>=2.7
+transformers>=4.40
+torch>=2.2
+Pillow>=10.0
+faiss-cpu>=1.8
+openai>=1.30

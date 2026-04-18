@@ -1,0 +1,76 @@
+{
+  "nodes": [
+    {
+      "id": "sales.csv",
+      "type": "dataset",
+      "path": "data/datasets/sales.csv",
+      "description": "Transactional sales records by customer, product, and region."
+    },
+    {
+      "id": "customers.csv",
+      "type": "dataset",
+      "path": "data/datasets/customers.csv",
+      "description": "Customer master data with segment and signup information."
+    },
+    {
+      "id": "churn.csv",
+      "type": "dataset",
+      "path": "data/datasets/churn.csv",
+      "description": "Churn outcomes and churn reasons for customers."
+    },
+    {
+      "id": "customer_revenue_join",
+      "type": "pipeline",
+      "description": "Join sales with customers to create enriched sales facts."
+    },
+    {
+      "id": "churn_impact_features",
+      "type": "pipeline",
+      "description": "Combine enriched sales with churn labels for impact analysis."
+    },
+    {
+      "id": "sales_summary_chart.png",
+      "type": "chart",
+      "path": "data/charts/sales_summary_chart.png",
+      "description": "Bar chart of total sales by region."
+    },
+    {
+      "id": "churn_by_segment_chart.png",
+      "type": "chart",
+      "path": "data/charts/churn_by_segment_chart.png",
+      "description": "Chart showing churn rates by customer segment."
+    }
+  ],
+  "edges": [
+    {
+      "source": "sales.csv",
+      "target": "customer_revenue_join",
+      "relation": "input_to"
+    },
+    {
+      "source": "customers.csv",
+      "target": "customer_revenue_join",
+      "relation": "input_to"
+    },
+    {
+      "source": "customer_revenue_join",
+      "target": "sales_summary_chart.png",
+      "relation": "produces"
+    },
+    {
+      "source": "customer_revenue_join",
+      "target": "churn_impact_features",
+      "relation": "input_to"
+    },
+    {
+      "source": "churn.csv",
+      "target": "churn_impact_features",
+      "relation": "input_to"
+    },
+    {
+      "source": "churn_impact_features",
+      "target": "churn_by_segment_chart.png",
+      "relation": "produces"
+    }
+  ]
+}

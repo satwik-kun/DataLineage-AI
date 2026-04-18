@@ -1,0 +1,9 @@
+customer_id,churned,churn_date,churn_reason
+C002,1,2026-02-05,Price
+C004,0,,
+C005,1,2026-02-18,Support
+C006,0,,
+C007,0,,
+C008,1,2026-03-01,Competitor
+C009,0,,
+C010,0,,
