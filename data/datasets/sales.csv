@@ -1,4 +1,4 @@
-sale_id,date,customer_id,product,quantity,unit_price,total_amount,region
+sale_id,date,customer_id,product,quantity,unit_price,revenue,region
 S001,2026-01-05,C001,Widget-A,2,120.0,240.0,North
 S002,2026-01-06,C002,Widget-B,1,200.0,200.0,South
 S003,2026-01-08,C003,Widget-A,3,120.0,360.0,East

@@ -45,7 +45,7 @@ class FaissVectorStore:
 
         self.metadata.extend(list(metadata))
 
-    def search(self, query_vector: np.ndarray, top_k: int = 3) -> List[Dict]:
+    def search(self, query_vector: np.ndarray, top_k: int = 5) -> List[Dict]:
         if len(self.metadata) == 0:
             return []
 

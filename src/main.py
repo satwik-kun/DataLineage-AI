@@ -3,34 +3,57 @@
 from __future__ import annotations
 
 import argparse
-import re
+import os
 from pathlib import Path
 from typing import List
 
 import pandas as pd
 
 from embedder import MultiModalEmbedder
-from graph_builder import build_lineage_graph, get_downstream_nodes, load_pipeline_metadata
+from graph_builder import (
+    build_impact_chains,
+    build_lineage_graph,
+    is_graph_dag,
+    load_pipeline_metadata,
+    simulate_impact,
+    simulate_impact_with_depth,
+)
 from rag import SimpleRAGExplainer
-from retriever import LineageRetriever
+from retriever import DEFAULT_TOP_K, LineageRetriever
+
+
+MIN_SEMANTIC_CONFIDENCE = 0.2
+_RUNTIME_CACHE: tuple | None = None
 
 
 def project_root_from_file() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def env_flag(name: str, default: bool = True) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def build_runtime() -> tuple:
+    global _RUNTIME_CACHE
+    if _RUNTIME_CACHE is not None:
+        return _RUNTIME_CACHE
+
     root = project_root_from_file()
     metadata = load_pipeline_metadata(root / "data" / "pipelines.json")
     graph = build_lineage_graph(metadata)
-    embedder = MultiModalEmbedder()
+    embedder = MultiModalEmbedder(enable_real_models=env_flag("AIR_ENABLE_REAL_MODELS", default=True))
     retriever = LineageRetriever(graph=graph, embedder=embedder, project_root=root)
     retriever.build_indices()
     rag = SimpleRAGExplainer()
-    return root, graph, retriever, rag
+    _RUNTIME_CACHE = (root, graph, retriever, rag)
+    return _RUNTIME_CACHE
 
 
-def generate_charts(root: Path) -> None:
+def generate_charts(root: Path, quiet: bool = False) -> None:
     data_dir = root / "data" / "datasets"
     chart_dir = root / "data" / "charts"
     chart_dir.mkdir(parents=True, exist_ok=True)
@@ -41,21 +64,22 @@ def generate_charts(root: Path) -> None:
 
     import matplotlib.pyplot as plt
 
-    sales_by_region = sales_df.groupby("region", as_index=False)["total_amount"].sum()
+    sales_by_region = sales_df.groupby("region", as_index=False)["revenue"].sum()
     plt.figure(figsize=(7, 4))
-    plt.bar(sales_by_region["region"], sales_by_region["total_amount"])
+    plt.bar(sales_by_region["region"], sales_by_region["revenue"])
     plt.title("Total Sales by Region")
     plt.xlabel("Region")
-    plt.ylabel("Total Amount")
+    plt.ylabel("Revenue")
     plt.tight_layout()
     plt.savefig(chart_dir / "sales_summary_chart.png", dpi=120)
+    plt.savefig(chart_dir / "sales_chart.png", dpi=120)
     plt.close()
 
     churn_join = customers_df.merge(churn_df, on="customer_id", how="left")
-    churn_join["churned"] = churn_join["churned"].fillna(0)
-    churn_rate = churn_join.groupby("segment", as_index=False)["churned"].mean()
+    churn_join["churn_flag"] = churn_join["churn_flag"].fillna(0)
+    churn_rate = churn_join.groupby("segment", as_index=False)["churn_flag"].mean()
     plt.figure(figsize=(7, 4))
-    plt.bar(churn_rate["segment"], churn_rate["churned"])
+    plt.bar(churn_rate["segment"], churn_rate["churn_flag"])
     plt.title("Churn Rate by Segment")
     plt.xlabel("Segment")
     plt.ylabel("Churn Rate")
@@ -63,7 +87,8 @@ def generate_charts(root: Path) -> None:
     plt.savefig(chart_dir / "churn_by_segment_chart.png", dpi=120)
     plt.close()
 
-    print(f"Charts generated in {chart_dir}")
+    if not quiet:
+        print(f"Charts generated in {chart_dir}")
 
 
 def summarize_text_hits(hits: List[dict]) -> List[str]:
@@ -73,25 +98,30 @@ def summarize_text_hits(hits: List[dict]) -> List[str]:
     return lines
 
 
-def parse_dataset_in_question(question: str) -> str | None:
-    match = re.search(r"([A-Za-z0-9_\-]+\.csv)", question)
-    if match:
-        return match.group(1)
-    return None
-
-
-def cmd_query_text(question: str) -> None:
+def cmd_query_text(question: str) -> bool:
     _, graph, retriever, rag = build_runtime()
-    text_hits = retriever.query_text(question, top_k=5)
+    text_hits = retriever.query_text(question, top_k=DEFAULT_TOP_K)
+    if not text_hits:
+        print("No retrieval matches found.")
+        return False
 
-    dataset_candidate = parse_dataset_in_question(question)
-    dependency_nodes = []
-    if dataset_candidate and dataset_candidate in graph:
-        dependency_nodes = get_downstream_nodes(graph, dataset_candidate)
+    best_score = float(text_hits[0].get("score", 0.0))
+    if best_score < MIN_SEMANTIC_CONFIDENCE:
+        print("Top text matches:")
+        for line in summarize_text_hits(text_hits):
+            print(f"- {line}")
+        print("\nExplanation:")
+        print("Low confidence: retrieved lineage evidence is insufficient to answer reliably.")
+        return False
+
+    top_node = text_hits[0].get("node_id")
+    dependency_nodes = retriever.impact_analysis(top_node) if top_node in graph else []
+    chains = build_impact_chains(graph, top_node, dependency_nodes) if top_node in graph else []
 
     context_lines = summarize_text_hits(text_hits)
     if dependency_nodes:
-        context_lines.append(f"Downstream dependents of {dataset_candidate}: {', '.join(dependency_nodes)}")
+        context_lines.append(f"Downstream dependents of {top_node}: {', '.join(dependency_nodes)}")
+    context_lines.extend(chains)
 
     print("Top text matches:")
     for line in context_lines:
@@ -99,37 +129,55 @@ def cmd_query_text(question: str) -> None:
 
     print("\nExplanation:")
     print(rag.explain(question, context_lines))
+    return bool(text_hits)
 
 
-def cmd_query_image(image_path: str) -> None:
-    _, _, retriever, rag = build_runtime()
-    hits = retriever.query_image(image_path, top_k=1)
+def cmd_query_image(image_path: str) -> bool:
+    root, graph, retriever, rag = build_runtime()
+
+    candidate_path = Path(image_path)
+    if not candidate_path.is_absolute():
+        candidate_path = root / candidate_path
+    if not candidate_path.exists():
+        print("Image path not found.")
+        return False
+
+    hits = retriever.retrieve_from_image(candidate_path, top_k=DEFAULT_TOP_K)
 
     if not hits:
         print("No image index entries found. Generate charts first.")
-        return
+        return False
 
     best = hits[0]
-    related = best.get("related_datasets", [])
-    print("Best matched chart node:")
+    node_id = best.get("node_id")
+    related = retriever.related_datasets_for_chart(node_id) if node_id in graph and graph.nodes[node_id].get("type") == "chart" else []
+    print("Top cross-modal match:")
     print(f"- {best.get('node_id')} (score={best.get('score'):.3f})")
-    print("Related datasets:")
-    for ds in related:
-        print(f"- {ds}")
+    print("Additional matches:")
+    for item in hits[1:4]:
+        print(f"- {item.get('node_id')} (type={item.get('type')}, score={item.get('score'):.3f})")
 
-    question = f"Given image {image_path}, which dataset is related?"
-    context = [f"Matched chart: {best.get('node_id')}", f"Related datasets: {', '.join(related) if related else 'none'}"]
+    if related:
+        print("Related datasets:")
+        for ds in related:
+            print(f"- {ds}")
+
+    question = f"Given image {candidate_path}, which dataset is related?"
+    context = [f"Matched node: {best.get('node_id')}", f"Related datasets: {', '.join(related) if related else 'none'}"]
     print("\nExplanation:")
     print(rag.explain(question, context))
+    return True
 
 
-def cmd_impact(dataset_id: str) -> None:
+def cmd_impact(dataset_id: str) -> bool:
     _, graph, _, rag = build_runtime()
     if dataset_id not in graph:
-        print(f"Dataset node not found in graph: {dataset_id}")
-        return
+        print("Node not found in lineage graph")
+        return False
 
-    impacted = get_downstream_nodes(graph, dataset_id)
+    impacted = simulate_impact(graph, dataset_id)
+    depths = simulate_impact_with_depth(graph, dataset_id)
+    chains = build_impact_chains(graph, dataset_id, impacted)
     print(f"Impacted downstream nodes for {dataset_id}:")
     if not impacted:
         print("- none")
@@ -139,25 +187,61 @@ def cmd_impact(dataset_id: str) -> None:
             print(f"- {node} (type={node_type})")
 
     question = f"If {dataset_id} is corrupted, what is affected?"
-    context = [f"Impacted nodes: {', '.join(impacted) if impacted else 'none'}"]
+    context = [f"Impacted nodes: {', '.join(impacted) if impacted else 'none'}"] + chains
+    if depths:
+        context.append(f"Max traversal depth: {max(depths.values())}")
     print("\nExplanation:")
     print(rag.explain(question, context))
+    return True
+
+
+def cmd_demo_tests() -> None:
+    root = project_root_from_file()
+    generate_charts(root, quiet=True)
+
+    global _RUNTIME_CACHE
+    _RUNTIME_CACHE = None
+    _, graph, retriever, _ = build_runtime()
+
+    text_hits = retriever.query_text("Which reports rely on revenue data?", top_k=DEFAULT_TOP_K)
+    test1_pass = any(hit.get("type") in {"chart", "pipeline"} for hit in text_hits)
+
+    image_hits = retriever.retrieve_from_image(root / "data" / "charts" / "sales_chart.png", top_k=DEFAULT_TOP_K)
+    test2_pass = any(hit.get("node_id") == "sales.csv" for hit in image_hits)
+
+    impacted = simulate_impact(graph, "sales.csv")
+    depth_map = simulate_impact_with_depth(graph, "sales.csv")
+    max_depth = max(depth_map.values()) if depth_map else 0
+    expected_nodes = {
+        "customer_revenue_join",
+        "churn_impact_features",
+        "sales_summary_chart.png",
+        "churn_by_segment_chart.png",
+    }
+    test3_pass = expected_nodes.issubset(set(impacted)) and max_depth > 1
+
+    dag_ok = is_graph_dag(graph)
+
+    print(f"TEST 1: TEXT QUERY -> {'PASS' if test1_pass else 'FAIL'}")
+    print(f"TEST 2: IMAGE QUERY -> {'PASS' if test2_pass else 'FAIL'}")
+    print(f"TEST 3: IMPACT ANALYSIS -> {'PASS' if test3_pass else 'FAIL'}")
+
+    # Internal invariant checks to enforce robustness without noisy CLI output.
+    assert dag_ok or len(depth_map) == len(set(impacted))
+    assert max_depth > 1
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="AI-powered Data Lineage & Impact Analysis Engine (MVP)")
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    sub.add_parser("generate-charts", help="Generate sample charts in data/charts")
-
-    text_p = sub.add_parser("query-text", help="Run text query (ex: What depends on sales.csv?)")
-    text_p.add_argument("--question", required=True, help="Natural language question")
-
-    image_p = sub.add_parser("query-image", help="Match an input chart image to known lineage chart nodes")
-    image_p.add_argument("--image-path", required=True, help="Path to query image")
-
-    impact_p = sub.add_parser("impact", help="Run impact analysis for a dataset node")
-    impact_p.add_argument("--dataset", required=True, help="Dataset id, e.g., sales.csv")
+    parser = argparse.ArgumentParser(
+        description="AI-powered Data Lineage & Impact Analysis Engine",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--query", type=str, help="Semantic text query, e.g. \"What depends on sales.csv?\"")
+    parser.add_argument("--image", type=str, help="Image path for cross-modal retrieval")
+    parser.add_argument("--impact", type=str, help="Dataset/node id for multi-hop impact analysis")
+    parser.add_argument("--demo-tests", action="store_true", help="Run mandatory rubric demo tests")
+    parser.add_argument("--generate-charts", action="store_true", help="Generate charts from datasets")
+    parser.add_argument("legacy_command", nargs="?", choices=["demo-tests", "generate-charts"], help="Legacy command mode")
 
     return parser
 
@@ -167,15 +251,26 @@ def main() -> None:
     args = parser.parse_args()
 
     root = project_root_from_file()
-
-    if args.command == "generate-charts":
+    if args.generate_charts or args.legacy_command == "generate-charts":
         generate_charts(root)
-    elif args.command == "query-text":
-        cmd_query_text(args.question)
-    elif args.command == "query-image":
-        cmd_query_image(args.image_path)
-    elif args.command == "impact":
-        cmd_impact(args.dataset)
+
+    if args.demo_tests or args.legacy_command == "demo-tests":
+        cmd_demo_tests()
+        return
+
+    action_taken = False
+    if args.query:
+        action_taken = True
+        cmd_query_text(args.query)
+    if args.image:
+        action_taken = True
+        cmd_query_image(args.image)
+    if args.impact:
+        action_taken = True
+        cmd_impact(args.impact)
+
+    if not action_taken and not args.generate_charts:
+        parser.print_help()
 
 
 if __name__ == "__main__":

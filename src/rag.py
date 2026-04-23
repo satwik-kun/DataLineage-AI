@@ -16,13 +16,26 @@ class SimpleRAGExplainer:
         return "\n".join(f"- {item}" for item in context_items)
 
     def _mock_explanation(self, question: str, context_items: List[str]) -> str:
-        context = self._format_context(context_items) if context_items else "- No context retrieved"
+        if not context_items:
+            return "No lineage evidence was retrieved to explain this query."
+
+        relationship_lines = []
+        for item in context_items:
+            if "-[" in item and "]->" in item:
+                relationship_lines.append(item)
+
+        if relationship_lines:
+            first = relationship_lines[0]
+            return (
+                f"For '{question}', lineage reasoning shows that {first}. "
+                "This indicates an upstream-to-downstream dependency flow, so a change in the source can propagate "
+                "through intermediate pipelines into final reports or datasets."
+            )
+
+        context = "; ".join(context_items)
         return (
-            "MVP explanation (mock LLM):\n"
-            f"Question: {question}\n"
-            "Relevant context:\n"
-            f"{context}\n"
-            "Interpretation: The answer is based on lineage edges and nearest semantic matches."
+            f"For '{question}', semantic retrieval identified relevant lineage nodes: {context}. "
+            "The response is grounded in vector similarity and graph relationships rather than keyword matching."
         )
 
     def explain(self, question: str, context_items: List[str]) -> str:

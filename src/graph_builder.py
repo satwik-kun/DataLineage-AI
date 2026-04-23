@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from pathlib import Path
 from typing import Dict, List
 
@@ -55,6 +56,76 @@ def get_upstream_nodes(graph: nx.DiGraph, node_id: str, include_source: bool = F
 def impact_analysis(graph: nx.DiGraph, corrupted_dataset: str) -> List[str]:
     """Alias for downstream traversal used by impact analysis."""
     return get_downstream_nodes(graph, corrupted_dataset)
+
+
+def simulate_impact(graph: nx.DiGraph, node_id: str) -> List[str]:
+    """Traverse all downstream nodes with BFS order for multi-hop impact simulation."""
+    if node_id not in graph:
+        return []
+
+    visited = {node_id}
+    queue: deque[str] = deque([node_id])
+    ordered: List[str] = []
+
+    while queue:
+        current = queue.popleft()
+        neighbors = sorted(graph.successors(current))
+        for neighbor in neighbors:
+            if neighbor in visited:
+                continue
+            visited.add(neighbor)
+            ordered.append(neighbor)
+            queue.append(neighbor)
+
+    return ordered
+
+
+def simulate_impact_with_depth(graph: nx.DiGraph, node_id: str) -> Dict[str, int]:
+    """Return BFS depth per downstream node from source; safe for cyclic graphs via visited set."""
+    if node_id not in graph:
+        return {}
+
+    visited = {node_id}
+    queue: deque[tuple[str, int]] = deque([(node_id, 0)])
+    depths: Dict[str, int] = {}
+
+    while queue:
+        current, depth = queue.popleft()
+        neighbors = sorted(graph.successors(current))
+        for neighbor in neighbors:
+            if neighbor in visited:
+                continue
+            visited.add(neighbor)
+            next_depth = depth + 1
+            depths[neighbor] = next_depth
+            queue.append((neighbor, next_depth))
+
+    return depths
+
+
+def is_graph_dag(graph: nx.DiGraph) -> bool:
+    """Check if lineage graph is a DAG."""
+    return nx.is_directed_acyclic_graph(graph)
+
+
+def build_impact_chains(graph: nx.DiGraph, source_node: str, impacted_nodes: List[str]) -> List[str]:
+    """Create readable source->...->target chains using shortest directed paths."""
+    chains: List[str] = []
+    for target in impacted_nodes:
+        try:
+            path = nx.shortest_path(graph, source=source_node, target=target)
+        except Exception:
+            continue
+
+        segments = []
+        for i in range(len(path) - 1):
+            left = path[i]
+            right = path[i + 1]
+            relation = graph.edges[left, right].get("relation", "depends_on")
+            segments.append(f"{left} -[{relation}]-> {right}")
+        if segments:
+            chains.append(" ; ".join(segments))
+    return chains
 
 
 def get_node_type(graph: nx.DiGraph, node_id: str) -> str:
